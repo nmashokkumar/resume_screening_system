@@ -2,23 +2,13 @@
 
 import re
 from typing import List
-def get_nlp():
-    """
-    Safely load spaCy model.
-    If not found, download it automatically (works on Streamlit Cloud).
-    """
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        from spacy.cli import download
-        download("en_core_web_sm")
-        return spacy.load("en_core_web_sm")
 
+import spacy
 
-# Load once
-nlp = get_nlp()
+# Load spaCy English model once
+nlp = spacy.load("en_core_web_sm")
 
-# Stopwords (used in your NLP cleaning)
+# Use spaCy's built-in stopword list
 STOP_WORDS = nlp.Defaults.stop_words
 
 
