@@ -1,106 +1,207 @@
-# app.py
 import os
+from pathlib import Path
 from typing import List
 
 import streamlit as st
 import pandas as pd
 
+# ✅ Your existing backend pipeline imports
 from src.jd_processor import process_jd_from_text
 from src.resume_parser import process_resumes_from_pdf_folder
 from src.matcher import run_matching_pipeline
+from src.llm_helper import call_llm_for_resume_eval
 
 
+# -----------------------------
+# Config
+# -----------------------------
 DATA_DIR = "data"
 RAW_RESUMES_DIR = os.path.join(DATA_DIR, "resumes_raw")
+TEXT_RESUMES_DIR = os.path.join(DATA_DIR, "resumes_text")
 
 
-def save_uploaded_pdfs(uploaded_files: List[st.runtime.uploaded_file_manager.UploadedFile]) -> None:
-    """
-    Save uploaded PDF files into data/resumes_raw/ folder.
-    """
+# -----------------------------
+# Helper: Save Uploaded PDFs
+# -----------------------------
+def save_uploaded_pdfs(uploaded_files: List):
     os.makedirs(RAW_RESUMES_DIR, exist_ok=True)
 
-    # Clear old resumes so each run is fresh (optional but clean)
-    for old_file in os.listdir(RAW_RESUMES_DIR):
-        if old_file.lower().endswith(".pdf"):
-            os.remove(os.path.join(RAW_RESUMES_DIR, old_file))
+    # Clear previous PDFs for clean runs
+    for f in os.listdir(RAW_RESUMES_DIR):
+        if f.lower().endswith(".pdf"):
+            os.remove(os.path.join(RAW_RESUMES_DIR, f))
 
     for file in uploaded_files:
-        save_path = os.path.join(RAW_RESUMES_DIR, file.name)
-        with open(save_path, "wb") as f:
+        path = os.path.join(RAW_RESUMES_DIR, file.name)
+        with open(path, "wb") as f:
             f.write(file.getbuffer())
 
 
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 def main():
-    st.set_page_config(page_title="Resume Scanner Pipeline App", layout="wide")
-
-    st.title("🔎 Resume Screening System – Pipeline + Streamlit")
-    st.write(
-        "This app uses a **3-file backend pipeline** (JD processor, resume parser, matcher) "
-        "and exposes it via Streamlit, similar to a mini Jobscan."
+    st.set_page_config(
+        page_title="AI Resume Jobscan (ATS + Gemini)",
+        layout="wide",
     )
 
-    col_jd, col_resumes = st.columns(2)
+    st.title("🧠 AI Resume Screening System")
+    st.caption("TF-IDF + spaCy + Gemini LLM | Built for GenAI & ATS Matching")
 
-    with col_jd:
-        st.subheader("📄 Job Description")
-        jd_text = st.text_area(
-            "Paste the Job Description here:",
-            height=250,
-            placeholder="Paste the EY / Data Scientist / AI Intern JD here...",
-        )
+    tab_scan, tab_about = st.tabs(["🔍 Resume Scanner", "ℹ️ About"])
 
-    with col_resumes:
-        st.subheader("📂 Upload Resume(s) – PDF")
-        uploaded_files = st.file_uploader(
-            "Upload one or more PDF resumes:",
-            type=["pdf"],
-            accept_multiple_files=True,
-        )
+    # ============================
+    # TAB 1: SCANNER
+    # ============================
+    with tab_scan:
+        col_left, col_right = st.columns([1.2, 1])
 
-    st.markdown("---")
+        with col_left:
+            st.subheader("📄 Job Description")
+            jd_text = st.text_area(
+                "Paste the Job Description:",
+                height=270,
+                placeholder="Paste EY GenAI / AI-ML Internship JD here...",
+            )
 
-    if st.button("🚀 Run Full Pipeline (JD + Resumes + Match)"):
-        if not jd_text.strip():
-            st.warning("Please paste the Job Description first.")
-            return
-        if not uploaded_files:
-            st.warning("Please upload at least one PDF resume.")
-            return
+        with col_right:
+            st.subheader("📂 Upload Resume(s)")
+            uploaded_files = st.file_uploader(
+                "Upload PDF resumes:",
+                type=["pdf"],
+                accept_multiple_files=True,
+            )
 
-        with st.spinner("Saving JD and resumes, and running pipeline..."):
-            # 1️⃣ JD → File 1 logic
-            process_jd_from_text(jd_text, data_dir=DATA_DIR)
+            st.info("Upload 1 or multiple resumes to compare against the JD.")
 
-            # 2️⃣ Save uploaded PDFs to data/resumes_raw/
-            save_uploaded_pdfs(uploaded_files)
+        st.markdown("---")
 
-            # 3️⃣ File 2: parse PDFs into text files
-            processed = process_resumes_from_pdf_folder(data_dir=DATA_DIR)
-            if not processed:
-                st.error("No valid resumes processed. Please check your PDFs.")
+        # ✅ Run ATS Pipeline Button
+        if st.button("🚀 Run ATS Matching", type="primary"):
+            if not jd_text.strip():
+                st.warning("Please paste the Job Description first.")
                 return
 
-            # 4️⃣ File 3: run matcher pipeline
-            df_results: pd.DataFrame = run_matching_pipeline(data_dir=DATA_DIR)
+            if not uploaded_files:
+                st.warning("Please upload at least one resume.")
+                return
 
-        st.subheader("📊 Match Results")
-        best_row = df_results.iloc[0]
-        st.success(
-            f"🎯 Best match: **{best_row['Resume Name']}** "
-            f"with **{best_row['Match Score (%)']}%** match."
-        )
+            with st.spinner("Saving JD and resumes..."):
+                process_jd_from_text(jd_text, data_dir=DATA_DIR)
+                save_uploaded_pdfs(uploaded_files)
 
-        st.dataframe(df_results.reset_index(drop=True), use_container_width=True)
+            with st.spinner("Parsing resumes..."):
+                processed = process_resumes_from_pdf_folder(data_dir=DATA_DIR)
+                if not processed:
+                    st.error("No valid resumes were processed.")
+                    return
 
-        st.caption("💡 ‘Suggested Keywords’ are words from the JD that are missing in the resume, to boost ATS alignment.")
+            with st.spinner("Running TF-IDF matching..."):
+                df_results = run_matching_pipeline(data_dir=DATA_DIR)
 
-        csv_data = df_results.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Download results as CSV",
-            data=csv_data,
-            file_name="resume_match_scores.csv",
-            mime="text/csv",
+            st.subheader("📊 ATS Match Results (TF-IDF)")
+
+            best_row = df_results.iloc[0]
+            st.metric(
+                label="Best Resume",
+                value=best_row["Resume Name"],
+                delta=f"{best_row['Match Score (%)']} %",
+            )
+
+            st.dataframe(df_results.reset_index(drop=True), use_container_width=True)
+
+            st.caption("ATS Score = TF-IDF + Cosine Similarity (Keyword Matching)")
+
+            # ✅ Save session state for Gemini
+            st.session_state["df_results"] = df_results
+            st.session_state["jd_text"] = jd_text
+
+        # ============================
+        # LLM SECTION (GEMINI)
+        # ============================
+        if "df_results" in st.session_state:
+            st.markdown("---")
+            st.subheader("🤖 LLM Semantic Evaluation (Gemini)")
+
+            df_results = st.session_state["df_results"]
+            jd_text_saved = st.session_state["jd_text"]
+
+            selected_resume = st.selectbox(
+                "Choose a resume for AI evaluation:",
+                options=list(df_results["Resume Name"]),
+            )
+
+            if st.button("🔍 Get AI Evaluation (Gemini)", type="secondary"):
+                base_name = Path(selected_resume).stem
+                txt_path = Path(TEXT_RESUMES_DIR) / f"{base_name}.txt"
+
+                if not txt_path.exists():
+                    st.error("Cleaned resume text not found.")
+                else:
+                    resume_text = txt_path.read_text(encoding="utf-8")
+
+                    with st.spinner("Calling Gemini LLM..."):
+                        try:
+                            llm_result = call_llm_for_resume_eval(
+                                jd_text_saved, resume_text
+                            )
+                        except Exception as e:
+                            st.error(f"LLM call failed: {e}")
+                        else:
+                            st.success("✅ AI Evaluation Completed")
+
+                            st.markdown(
+                                f"### 🧠 LLM Fit Score: **{llm_result['score']} / 100**"
+                            )
+
+                            if llm_result.get("summary"):
+                                st.markdown("**Summary:**")
+                                st.write(llm_result["summary"])
+
+                            suggestions = llm_result.get("suggested_keywords", [])
+                            if suggestions:
+                                st.markdown("**💡 Suggested Keywords to Add:**")
+                                for kw in suggestions:
+                                    st.markdown(f"- `{kw}`")
+                            else:
+                                st.info("No keyword suggestions returned by the LLM.")
+
+                            with st.expander("🔍 Raw LLM Output (Debug)"):
+                                st.json(llm_result)
+
+    # ============================
+    # TAB 2: ABOUT
+    # ============================
+    with tab_about:
+        st.markdown(
+            """
+### ✅ About This Project
+
+This is a **Hybrid AI Resume Screening System** built using:
+
+- **ATS Layer:**  
+  - TF-IDF Vectorization  
+  - Cosine Similarity  
+  - spaCy NLP Cleaning  
+
+- **GenAI Layer:**  
+  - Google **Gemini LLM (gemini-2.5-flash)**  
+  - Semantic Resume Evaluation  
+  - AI Fit Score (0–100)  
+  - Resume Keyword Improvement Suggestions  
+
+### ✅ What This Demonstrates
+
+- Applied **NLP & Machine Learning**
+- **GenAI + LLM Integration**
+- Real-world **ATS-style Resume Matching**
+- End-to-end **AI System Design**
+
+Built for:
+- GenAI / AI-ML Internships  
+- EY / Consulting / Data Science Roles  
+"""
         )
 
 
